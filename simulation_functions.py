@@ -1,5 +1,91 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+from tqdm import tqdm
+
+def plot_eigenvectors(v,nt,n_f,v_0_idx = 0, v_f_idx = 5):
+    for i in range(v_0_idx,v_f_idx):#v.shape[0]):
+        v_plot = np.dot(v[:,i],nt)
+        n_f_v = np.dot(v[:,i],n_f)
+        #v_plot = v_plot - v_plot[-1]
+        v_plot = v_plot - n_f_v
+        if i == 0:
+            plt.plot(t,v_plot,'--',label = 'Slow Mode')
+            plt.legend()
+        else:
+            plt.plot(t,v_plot)
+            
+def calc_dndt_controlled(k,K,n,n_f,lam,lam_p,lam_c,s_hat):
+    s = np.dot(s_hat,n - n_f)
+    return np.matmul(k*(np.outer(np.ones(len(n)),n)+ K)**(-1),n) - lam*n - lam_p*n - s*lam_c#*n
+
+def load_3d_matrix_from_csv(csv_file_path):
+    matrix_slices = []
+    current_slice = []
+    
+    with open(csv_file_path, 'r') as csv_file:
+        for line in csv_file:
+            if line.strip():  # Non-empty line
+                if line.startswith("Depth"):
+                    if current_slice:
+                        matrix_slices.append(current_slice)
+                        current_slice = []
+                else:
+                    values = line.strip().split(',')
+                    current_slice.append(list(map(float, values)))  # Change int to float
+    
+    if current_slice:
+        matrix_slices.append(current_slice)
+    
+    matrix_3d = np.array(matrix_slices)
+    return matrix_3d
+
+def sim_dyn(n0,t_f,k,K,lam):
+    def dndt(t,n):
+        output = calc_dndt(k,K,n,lam)
+        return output
+    t_span = [0, t_f]  # Time span to solve the differential equation
+    rtol = 1e-6  # Relative tolerance for the solution
+    atol = 1e-9  # Absolute tolerance for the solution
+    sol = solve_ivp(dndt, t_span, n0, rtol=rtol, atol=atol, dense_output=True, method='Radau')
+
+    # Create an interpolating function for the solution
+    sol_fun = sol.sol
+
+    # Evaluate the solution at a large number of time points for plotting
+    t_eval = np.linspace(t_span[0], t_span[1], 1000)
+    n_eval = sol_fun(t_eval)
+    return n_eval, t_eval
+
+def sim_dyn_controlled(n0,t_f,k,K,n_f,lam,lam_p,lam_c,s_hat):
+    def dndt(t,n):
+        output = calc_dndt_controlled(k,K,n,n_f,lam,lam_p,lam_c,s_hat)
+        return output
+    t_span = [0, t_f]  # Time span to solve the differential equation
+    rtol = 1e-6  # Relative tolerance for the solution
+    atol = 1e-9  # Absolute tolerance for the solution
+    sol = solve_ivp(dndt, t_span, n0, rtol=rtol, atol=atol, dense_output=True, method='Radau')
+
+    # Create an interpolating function for the solution
+    sol_fun = sol.sol
+
+    # Evaluate the solution at a large number of time points for plotting
+    t_eval = np.linspace(t_span[0], t_span[1], 1000)
+    n_eval = sol_fun(t_eval)
+    return n_eval, t_eval
+
+def evaluate_fitness_controlled(k,K,n_f,lam,lam_c,s_hat,m,t_f,g):
+    dists = []
+    for i in range(m):
+        lam_p = np.zeros(g) 
+        #idx = np.random.randint(5)
+        lam_p[i] = lam_p[i]+2
+        nt, t = sim_dyn_controlled(n_f,t_f,k,K,n_f,lam,lam_p,lam_c,s_hat)
+        dists.append(n_f_dist(n_f,nt[:,-1]))
+    return np.mean(dists)
+
+def n_f_dist(n_f,n_p):
+    return np.linalg.norm(n_f-n_p)/np.linalg.norm(n_f)
 
 def calc_dndt(k,K,n,lam):
     return np.matmul(k*(np.outer(np.ones(len(n)),n)+ K)**(-1),n) - lam*n
@@ -23,3 +109,45 @@ def simulate_dynamics(k,K,lam,n0,thresh = 0.0001, cutoff = 500000, dt = 0.01):
             break
 
     return nt
+
+def simulated_annealing(k,K,n_f,lam,lam_c_0,s_hat_0,m,t_f, num_iterations, temperature, cooling_rate,g):
+    best_s_hat = lam_c_0
+    best_lam_c = s_hat_0
+    best_cost = evaluate_fitness_controlled(k,K,n_f,lam,best_lam_c,best_s_hat,m,t_f,g)
+
+    current_s_hat = lam_c_0
+    current_lam_c = s_hat_0
+    current_cost = best_cost
+
+    costs = []
+
+    for iteration in tqdm(range(num_iterations)):
+        costs.append(current_cost)
+        new_s_hat = current_s_hat + np.random.normal(0, 0.2, size=current_s_hat.shape)
+        new_lam_c = current_lam_c + np.random.normal(0, 0.2, size=current_lam_c.shape)
+
+        # Ensure the Euclidean norm of new_params2 is 1
+        new_s_hat /= np.linalg.norm(new_s_hat)
+
+        new_cost = evaluate_fitness_controlled(k,K,n_f,lam,new_lam_c,new_s_hat,m,t_f,g)
+
+        if new_cost < current_cost:
+            current_s_hat = new_s_hat
+            current_lam_c = new_lam_c
+            current_cost = new_cost
+
+            if new_cost < best_cost:
+                best_s_hat = new_s_hat
+                best_lam_c = new_lam_c
+                best_cost = new_cost
+        else:
+            probability = np.exp((current_cost - new_cost) / temperature)
+            if np.random.random() < probability:
+                current_s_hat = new_s_hat
+                current_lam_c = new_lam_c
+                current_cost = new_cost
+
+        temperature *= cooling_rate
+        #if iteration/100 ==0 :
+            #print(current_cost)
+    return best_s_hat, best_lam_c, costs
