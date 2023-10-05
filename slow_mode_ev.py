@@ -62,7 +62,7 @@ current_cost = evaluate_fitness_controlled_norm(current_k,current_K,n_f,lam,lam_
 
 costs = []
 
-for kk in tqdm(range(2000)):
+for kk in range(2000):
     start_time = time.time()
     lambdas.append(current_dlambda)
     costs.append(current_cost)
