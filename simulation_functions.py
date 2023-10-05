@@ -2,18 +2,20 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 from tqdm import tqdm
+from scipy import integrate
+from scipy.special import iv
 
 def plot_eigenvectors(v,nt,n_f,v_0_idx = 0, v_f_idx = 5):
     for i in range(v_0_idx,v_f_idx):#v.shape[0]):
         v_plot = np.dot(v[:,i],nt)
         n_f_v = np.dot(v[:,i],n_f)
         #v_plot = v_plot - v_plot[-1]
-        v_plot = v_plot - n_f_v
+        v_plot = np.abs(v_plot - n_f_v)
         if i == 0:
-            plt.plot(t,v_plot,'--',label = 'Slow Mode')
+            plt.plot(v_plot,'--',label = 'Slow Mode')
             plt.legend()
         else:
-            plt.plot(t,v_plot)
+            plt.plot(v_plot)
             
 def calc_dndt_controlled(k,K,n,n_f,lam,lam_p,lam_c,s_hat):
     s = np.dot(s_hat,n - n_f)
@@ -84,6 +86,23 @@ def evaluate_fitness_controlled(k,K,n_f,lam,lam_c,s_hat,m,t_f,g):
         dists.append(n_f_dist(n_f,nt[:,-1]))
     return np.mean(dists)
 
+def evaluate_fitness_controlled_norm(k,K,n_f,lam,lam_c,s_hat,m,t_f,g):
+    dists = []
+    for i in range(m):
+        lam_p = np.zeros(g) 
+        #idx = np.random.randint(5)
+        lam_p[i] = lam_p[i]+2
+        nt, t = sim_dyn_controlled(n_f,t_f,k,K,n_f,lam,lam_p,lam_c,s_hat)
+        dists.append(n_f_dist(n_f,nt[:,-1]))
+    dists_norm = []
+    for i in range(m):
+        lam_p = np.zeros(g) 
+        #idx = np.random.randint(5)
+        lam_p[i] = lam_p[i]+2
+        nt, t = sim_dyn_controlled(n_f,t_f,k,K,n_f,lam,lam_p,np.zeros(g),np.zeros(g))
+        dists_norm.append(n_f_dist(n_f,nt[:,-1]))
+    return np.mean(dists)/np.mean(dists_norm)
+
 def n_f_dist(n_f,n_p):
     return np.linalg.norm(n_f-n_p)/np.linalg.norm(n_f)
 
@@ -109,6 +128,71 @@ def simulate_dynamics(k,K,lam,n0,thresh = 0.0001, cutoff = 500000, dt = 0.01):
             break
 
     return nt
+def von_mises_fisher_pdf(x, kappa, mu):
+    return np.exp(kappa * np.dot(mu, x)) / ((2 * np.pi) ** (len(x)/2) * iv(len(x)/2 - 1, kappa))
+
+def generate_distributed_vectors(n,k,sigma):
+    vectors = []
+    mu = np.zeros(n) + 1
+    mu = mu/np.linalg.norm(mu)
+    vectors = sp.stats.vonmises_fisher.rvs(mu=mu, kappa = sigma,size = k)
+    return vectors
+
+def optimize_nd_single_perturbation(n=5, mode_gap = 1, df = 0):
+    if df == 0:
+        df = (np.zeros(n) + 1)/np.linalg.norm(np.zeros(n) + 1)
+    v_1 = np.zeros(n)
+    v_1[0] = 1
+    df_orth = np.array(df)
+    df_orth[0] = 0
+    df_orth = df_orth/np.linalg.norm(df_orth)
+    theta = np.arccos(np.dot(df,v_1))
+    alphas_s = np.linspace(0,theta,100)
+    alphas_g = np.linspace(0,theta,100)
+    Jx = np.zeros((n,n))
+    for i in range(n):
+        Jx[i,i] = -2
+    Jx[0,0]= -2/mode_gap
+    results = np.zeros((len(alphas_s),len(alphas_g)))    
+    for i in range(len(alphas_s)):
+        for j in range(len(alphas_g)):
+            s = np.cos(alphas_s[i])*v_1 + np.sin(alphas_s[i])*df_orth
+            g = np.cos(alphas_g[j])*v_1 + np.sin(alphas_g[j])*df_orth
+            gJxs = np.matmul(g,np.matmul(np.linalg.inv(Jx),s))
+            Jxgs_inv = np.linalg.inv(Jx - np.outer(g, s))
+            results[i,j] = dx_norm_efficient(df,Jxgs_inv,gJxs)
+    i,j = np.argwhere(results == np.min(results))[0]
+    return theta, alphas_s[i], alphas_g[j]
+    
+def optimize_nd_many_perturbations(n=5, mode_gap = 1, sigma = 0.1, n_perturbs = 2000,df = 0):
+    if df == 0:
+        df = (np.zeros(n) + 1)/np.linalg.norm(np.zeros(n) + 1)
+    v_1 = np.zeros(n)
+    v_1[0] = 1
+    df_orth = np.array(df)
+    df_orth[0] = 0
+    df_orth = df_orth/np.linalg.norm(df_orth)
+    theta = np.arccos(np.dot(df,v_1))
+    alphas_s = np.linspace(0,theta,100)
+    alphas_g = np.linspace(0,theta,100)
+    Jx = np.zeros((n,n))
+    for i in range(n):
+        Jx[i,i] = -2
+    Jx[0,0]= -2/mode_gap
+    results = np.zeros((len(alphas_s),len(alphas_g)))    
+    dfs = generate_distributed_vectors(n,n_perturbs,sigma)
+
+    for i in tqdm(range(len(alphas_s))):
+        for j in range(len(alphas_g)):
+            s = np.cos(alphas_s[i])*v_1 + np.sin(alphas_s[i])*df_orth
+            g = np.cos(alphas_g[j])*v_1 + np.sin(alphas_g[j])*df_orth
+            gJxs = np.matmul(g,np.matmul(np.linalg.inv(Jx),s))
+            Jxgs_inv = np.linalg.inv(Jx - np.outer(g, s))
+            results[i,j] = np.mean([dx_norm_efficient(df,Jxgs_inv,gJxs) for df in dfs])
+    i,j = np.argwhere(results == np.min(results))[0]
+    return theta, alphas_s[i], alphas_g[j]
+
+
 
 def simulated_annealing(k,K,n_f,lam,lam_c_0,s_hat_0,m,t_f, num_iterations, temperature, cooling_rate,g):
     best_s_hat = lam_c_0
