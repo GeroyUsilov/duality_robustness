@@ -9,5 +9,4 @@
 #SBATCH --mem-per-cpu=10000
 
 module load python
-
 ./slow_mode.sh $1
