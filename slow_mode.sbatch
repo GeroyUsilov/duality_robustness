@@ -10,4 +10,4 @@
 
 module load python
 
-./slow_modev.sh $1
+./slow_mode.sh $1
